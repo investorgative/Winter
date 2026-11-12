@@ -120,6 +120,7 @@ CITIES = {  # city: (Kalshi series, timezone)
 API = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_ENABLED = bool(CONF["demo"].get("enabled"))
 DEMO_KEY_ID = str(CONF["demo"].get("key_id") or "")
+DEMO_START = float(CONF["demo"].get("start_balance") or 0)   # demo account balance when it was connected
 DEFAULT_KEY_FILE = "kalshi_demo.pem"
 
 def _sane_key_file(v):
@@ -646,8 +647,19 @@ def taker_fill(fav, n_want, levels=None):
     return got, cost / got, math.ceil(round(raw_fee * 100, 6)) / 100, "book"
 
 def bank_of(rows, book):
+    if book == "demo":                      # the demo book IS the demo account: size from its real balance
+        live = DEMO_BAL.get("v")
+        if live is None:
+            try:
+                live = DEMO_BAL["v"] = demo_balance()
+            except Exception:
+                live = None
+        return live if live is not None else (DEMO_START or START_BANKROLL)
     return START_BANKROLL + sum(float(r["pnl"]) for r in rows
                                 if r["book"] == book and r["status"] == "settled" and r["pnl"] != "")
+
+def book_start(book):
+    return (DEMO_START or DEMO_BAL.get("v") or START_BANKROLL) if book == "demo" else START_BANKROLL
 
 def used_today(rows, book):
     today = dt.datetime.now(TZ).date().isoformat()
@@ -887,7 +899,7 @@ def normalize_pem(text):
 def demo_connect(key_id, pem_text):
     """Validate a pasted demo key with Kalshi, then store it and switch the demo book on."""
     from cryptography.hazmat.primitives import serialization
-    global DEMO_KEY_ID, _DEMO_KEY
+    global DEMO_KEY_ID, _DEMO_KEY, DEMO_START
     key_id = (key_id or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_\-]{6,80}", key_id):
         raise ValueError("the Key ID looks wrong - copy it from demo.kalshi.co -> API keys")
@@ -921,7 +933,8 @@ def demo_connect(key_id, pem_text):
         f.write(pem)
     os.replace(tmp, path)
     os.chmod(path, 0o600)
-    save_config({"demo": {"enabled": True, "key_id": key_id, "key_file": DEMO_KEY_FILE}})
+    DEMO_START = float(bal or 0)
+    save_config({"demo": {"enabled": True, "key_id": key_id, "key_file": DEMO_KEY_FILE, "start_balance": DEMO_START}})
     set_demo(True, key_id)
     _DEMO_KEY = key
     DEMO_BAL["v"] = bal
@@ -1027,6 +1040,10 @@ def demo_execute(base, fav, bank):
         return dict(row, status="nofill", fill_src=note)
     p = cost / n if cost else fav["ask"]
     say(f"  demo: filled {n}/{n_want} @ {p:.3f}, fee ${fees:.2f} ({note})")
+    try:
+        DEMO_BAL["v"] = demo_balance()
+    except Exception:
+        pass
     return dict(row, status="open", price=round(p, 4), contracts=n, fee=round(fees, 2),
                 filled=dt.datetime.now(TZ).strftime("%H:%M"), fill_src=note)
 
@@ -1172,8 +1189,11 @@ def build_data():
         done = [{"date": r["date"], "price": float(r["price"]), "contracts": int(r["contracts"]),
                  "win": int(r["win"]), "pnl": float(r["pnl"]), "fee": float(r["fee"])}
                 for r in mine if r["status"] == "settled"]
-        s = book_stats(done)
+        st = book_start(b)
+        s = book_stats(done, st)
         s["verdict"] = verdict(s)
+        s["start"] = st
+        s["capital"] = DEMO_BAL["v"] if b == "demo" and DEMO_BAL.get("v") is not None else st + s.get("pnl", 0.0)
         s["open"] = sum(r["status"] in ("open", "working") for r in mine)
         s["orders"] = sum(r["status"] in ("open", "settled", "unfilled") for r in mine)
         s["filled_n"] = sum(r["status"] in ("open", "settled") for r in mine)

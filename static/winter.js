@@ -283,8 +283,8 @@ function render(first) {
     const fr = s.orders ? pct(s.filled_n / s.orders) : "–";
     return `<div class="glass card${R}" style="--i:${i + 3}">
       <div class="book-head"><span class="label" style="color:${BOOKCOL[k]}">● ${BOOKNAME[k] || k}</span><span class="tag ${verdictCls(s.verdict)}">${esc(s.verdict)}</span></div>
-      ${k === "demo" ? `<div class="note">Real orders on the Kalshi DEMO exchange (fake money). Tests order handling, not the edge.${D.demo.balance != null ? " Demo balance " + money(D.demo.balance) + "." : ""}</div>` : ""}
-      <div class="big">${money(D.start + (s.pnl || 0))}</div>
+      ${k === "demo" ? `<div class="note">This is your Kalshi DEMO account (fake money): the number is its live balance, trades are sized from it. Tests order handling, not the edge.</div>` : ""}
+      <div class="big">${money(s.capital != null ? s.capital : (s.start || D.start) + (s.pnl || 0))}</div>
       <div class="book-chart" data-book="${k}"></div>
       <div class="kv"><span>Settled</span><span>${s.n || 0}${k === "maker" ? " · fill " + fr + (b && b.fill_rate != null ? " (bt " + pct(b.fill_rate) + ")" : "") : " · " + (s.open || 0) + " open"}</span>
         <span>Wins / price-implied</span><span>${s.n ? s.wins + " / " + s.exp_wins : "–"}</span>
@@ -293,7 +293,7 @@ function render(first) {
         <span>Fees</span><span>${s.n ? money(s.fees) : "–"}</span></div>
       ${ciCompare(s, b)}</div>`; }).join("");
   document.querySelectorAll(".book-chart").forEach(el => {
-    const k = el.dataset.book; lineChart(el, D.fwd[k].equity, {h:70, base:D.start, color:BOOKCOL[k], label:BOOKNAME[k] + " equity", empty:"No settled trades yet."}); });
+    const k = el.dataset.book; lineChart(el, D.fwd[k].equity, {h:70, base:D.fwd[k].start || D.start, color:BOOKCOL[k], label:BOOKNAME[k] + " equity", empty:"No settled trades yet."}); });
   renderDemo(D, R);
   /* cities */
   $("cities").innerHTML = D.sched.map((c, i) => `<div class="glass city${c.done ? " done" : ""}${R}" style="--i:${i + 6}" data-tz="${esc(c.tz)}" data-next="${c.next_ts}">
