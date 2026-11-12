@@ -87,16 +87,18 @@ Autostart after reboot: `crontab -e`, add
 ## Kalshi demo account (optional, fake money)
 1. Sign up at **demo.kalshi.co/sign-up** (not .com). Kalshi's own guide says to use mock personal details.
 2. Add fake funds with a test card: Visa `4000 0566 5566 5556`, any future date, any CVV.
-3. Profile/Account settings → **API Keys** → create a key. The private key is shown **once**:
-   save it as `~/winter/kalshi_demo.pem`, then `chmod 600 ~/winter/kalshi_demo.pem`. Copy the **Key ID**.
-4. `nano config.json` → `"demo": {"enabled": false, "key_id": "<your key id>", "key_file": "kalshi_demo.pem"}`
-5. Test the connection (logs in, finds weather markets, places one 1¢ bid and cancels it):
-   ```bash
-   ./venv/bin/python winter.py demo-check
-   ```
-6. All lines `OK` → set `"enabled": true`, then `./stop.sh && ./start.sh`. A third "Demo book" card appears.
+3. Profile/Account settings → **API Keys** → create a key. Copy the **Key ID** and the **private key**
+   (shown once, or downloaded as a file).
+4. On the Winter website, unlock, scroll to the **Demo book** tile, paste the Key ID and the private key
+   (or tap *choose the key file*), press **Connect demo**.
 
-`.pem` files and `config.json` are in `.gitignore`, so keys never end up on GitHub.
+Winter checks the key with Kalshi demo right away, stores it on the Pi as `kalshi_demo.pem`
+(permissions 600, in `.gitignore`), turns the demo book on, no restart. The key is never sent back to
+the browser. **Run test order** places a 1-contract bid at 1¢ and cancels it; **Disconnect** deletes the key.
+A wrong Key ID or key is rejected with a message and nothing is saved.
+
+Command-line alternative: put the key file at `~/winter/kalshi_demo.pem`, the Key ID into
+`config.json` → `"demo": {"enabled": true, "key_id": "…"}`, then `./venv/bin/python winter.py demo-check`.
 
 ## Settings (`config.json`)
 | key | default | meaning |

@@ -116,7 +116,7 @@ async function lock(reason) {
   snow.setDensity(1);
   setTimeout(() => { if (!S.token) wipe(); }, 900);
 }
-function wipe() { ["books","cities","cap","open","log","decs","done","bt","dl","heroSpark"].forEach(id => { const e = $(id); if (e) e.innerHTML = ""; }); }
+function wipe() { S.demoView = null; ["books","demoSetup","cities","cap","open","log","decs","done","bt","dl","heroSpark"].forEach(id => { const e = $(id); if (e) e.innerHTML = ""; }); }
 
 async function refresh(first) {
   if (!S.token) return false;
@@ -292,6 +292,7 @@ function render(first) {
       ${ciCompare(s, b)}</div>`; }).join("");
   document.querySelectorAll(".book-chart").forEach(el => {
     const k = el.dataset.book; lineChart(el, D.fwd[k].equity, {h:70, base:D.start, color:BOOKCOL[k], label:BOOKNAME[k] + " equity", empty:"No settled trades yet."}); });
+  renderDemo(D, R);
   /* cities */
   $("cities").innerHTML = D.sched.map((c, i) => `<div class="glass city${c.done ? " done" : ""}${R}" style="--i:${i + 6}" data-tz="${esc(c.tz)}" data-next="${c.next_ts}">
       ${c.done ? `<span class="badge up">✓</span>` : ""}<div class="cn">${esc(c.city)}</div>
@@ -360,6 +361,87 @@ function render(first) {
   $("foot").innerHTML = `${esc(D.version)} · auto-lock after ${D.autolock_min} min · data refreshes every minute`;
   S.first = false;
 }
+
+/* ---------- demo tile: paste the key here, Winter does the rest ---------- */
+function renderDemo(D, R) {
+  const dm = D.demo || {}, view = dm.enabled && dm.connected ? "on" : "setup";
+  const box = $("demoSetup");
+  if (view === "on") {
+    const bal = dm.balance != null ? money(dm.balance) : "–";
+    if (S.demoView === "on") { const b = box.querySelector("[data-bal]"); if (b) b.textContent = bal; return; }
+    box.innerHTML = `<div class="glass card demo-card${R}"><div class="demo-on">
+        <div><div class="label" style="color:var(--s3)">● Kalshi demo · connected</div>
+        <div class="small muted" style="margin-top:6px">Key ${esc(dm.key_hint)} · demo balance <b data-bal>${bal}</b> · every taker trade is also sent as a real order to the demo exchange</div></div>
+        <div class="btn-row" style="margin:0"><button type="button" class="btn" id="dmCheck">Run test order</button>
+        <button type="button" class="btn danger" id="dmOff">Disconnect</button></div></div>
+        <div class="status-line" id="dmStatus"></div><ul class="steps" id="dmSteps"></ul></div>`;
+  } else {
+    if (S.demoView === "setup") return;           // never wipe the form while you type
+    box.innerHTML = `<div class="glass card demo-card${R}">
+      <div class="label" style="color:var(--s3)">● Demo book · connect your Kalshi demo key</div>
+      <div class="demo-grid">
+        <div class="small muted">
+          <p style="margin:6px 0">Paste the key from <b>demo.kalshi.co</b> → Account → <b>API Keys</b> (fake money). Winter checks it with Kalshi,
+          stores it only on your Pi, and from then on sends every taker trade as a real order to the demo exchange. No restart needed.</p>
+          <p style="margin:6px 0">The private key is never shown again and never leaves the Pi. Demo prices differ from the real market,
+          so this tests order handling, not the edge.</p>
+          ${location.protocol === "http:" && !/^(192\.168|10\.|172\.(1[6-9]|2\d|3[01])\.|localhost|127\.)/.test(location.hostname)
+            ? `<p style="margin:6px 0;color:var(--warn)">You are on plain http. Use the https tunnel link or your home Wi-Fi to paste a key.</p>` : ""}
+        </div>
+        <div>
+          <div class="field"><label for="dmId">Key ID</label><input id="dmId" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. 1a2b3c4d-…"></div>
+          <div class="field"><label for="dmKey">Private key</label><textarea id="dmKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;…&#10;-----END RSA PRIVATE KEY-----"></textarea></div>
+          <div class="btn-row"><button type="button" class="btn primary" id="dmConnect">Connect demo</button>
+            <span class="btn file-btn">or choose the key file<input type="file" id="dmFile" accept=".pem,.key,.txt,text/plain,application/x-pem-file"></span></div>
+          <div class="status-line" id="dmStatus"></div>
+        </div></div></div>`;
+  }
+  S.demoView = view;
+}
+async function demoPost(path, body) {
+  const r = await fetch(path, {method:"POST", cache:"no-store", headers:{"Content-Type":"application/json", "X-Winter-Token":S.token || ""}, body:JSON.stringify(body || {})});
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (r.status === 401) { lock("Session ended"); throw new Error("locked"); }
+  if (r.status !== 200) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+function dmStatus(html) { const e = $("dmStatus"); if (e) e.innerHTML = html; }
+async function afterDemoChange() { S.demoView = null; if (await refresh(false)) render(false); }
+document.addEventListener("change", e => {
+  if (e.target.id !== "dmFile" || !e.target.files[0]) return;
+  const f = e.target.files[0];
+  if (f.size > 20000) { dmStatus(`<span class="down">That file is too big to be a key.</span>`); return; }
+  const rd = new FileReader();
+  rd.onload = () => { $("dmKey").value = rd.result; dmStatus(`Loaded <b>${esc(f.name)}</b> - now press Connect demo.`); };
+  rd.readAsText(f);
+});
+document.addEventListener("click", async e => {
+  const id = e.target.id;
+  if (id === "dmConnect") {
+    const key_id = $("dmId").value.trim(), private_key = $("dmKey").value;
+    if (!key_id || !private_key.trim()) { dmStatus(`<span class="down">Key ID and private key are both needed.</span>`); return; }
+    e.target.disabled = true; dmStatus(`<span class="spin"></span>Checking the key with Kalshi demo…`);
+    try {
+      const j = await demoPost("/api/demo/connect", {key_id, private_key});
+      $("dmKey").value = ""; toast("Demo connected · balance " + money(j.balance || 0));
+      await afterDemoChange();
+    } catch (err) { if (err.message !== "locked") dmStatus(`<span class="down">✗ ${esc(err.message)}</span>`); e.target.disabled = false; }
+  }
+  if (id === "dmCheck") {
+    e.target.disabled = true; dmStatus(`<span class="spin"></span>Placing a 1¢ test bid on demo and cancelling it…`); $("dmSteps").innerHTML = "";
+    try {
+      const j = await demoPost("/api/demo/check", {});
+      $("dmSteps").innerHTML = j.steps.map(s => `<li><span class="${s.ok ? "up" : "down"}">${s.ok ? "✓" : "✗"}</span><span>${esc(s.step)}<br><span class="d">${esc(s.detail)}</span></span></li>`).join("");
+      dmStatus(j.ok ? `<span class="up">Everything works.</span>` : `<span class="down">A step failed - see below.</span>`);
+    } catch (err) { if (err.message !== "locked") dmStatus(`<span class="down">✗ ${esc(err.message)}</span>`); }
+    e.target.disabled = false;
+  }
+  if (id === "dmOff") {
+    if (!confirm("Disconnect the demo account? The key file on the Pi is deleted and the demo book stops.")) return;
+    try { await demoPost("/api/demo/disconnect", {}); toast("Demo disconnected"); await afterDemoChange(); }
+    catch (err) { if (err.message !== "locked") dmStatus(`<span class="down">✗ ${esc(err.message)}</span>`); }
+  }
+});
 
 function tickCountdowns() {
   const now = nowSrv();

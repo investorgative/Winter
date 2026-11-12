@@ -814,18 +814,115 @@ def demo_key():
             from cryptography.hazmat.primitives import serialization
         except ImportError:
             raise RuntimeError("missing package: pip install cryptography")
-        path = DEMO_KEY_FILE if os.path.isabs(DEMO_KEY_FILE) else os.path.join(BASE, DEMO_KEY_FILE)
+        path = demo_key_path()
         if not os.path.exists(path):
             raise RuntimeError(f"demo private key not found: {path}")
         with open(path, "rb") as f:
             _DEMO_KEY = serialization.load_pem_private_key(f.read(), password=None)
     return _DEMO_KEY
 
+def demo_key_path():
+    return DEMO_KEY_FILE if os.path.isabs(DEMO_KEY_FILE) else os.path.join(BASE, DEMO_KEY_FILE)
+
 def demo_key_id():
     k = DEMO_KEY_ID or os.environ.get("KALSHI_DEMO_KEY_ID", "")
     if not k:
-        raise RuntimeError('demo key_id is empty: put it into config.json -> "demo": {"key_id": "..."}')
+        raise RuntimeError("no demo key connected (website: Demo tile, or config.json -> demo.key_id)")
     return k
+
+def save_config(updates):
+    """Merge updates into config.json without touching other keys (passcode etc.)."""
+    path = os.path.join(BASE, "config.json")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    for k, v in updates.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+def set_demo(enabled, key_id):
+    """Switch the demo book on/off at runtime (no restart needed)."""
+    global DEMO_ENABLED, DEMO_KEY_ID, FWD_BOOKS, _DEMO_KEY
+    DEMO_ENABLED, DEMO_KEY_ID, _DEMO_KEY = bool(enabled), key_id or "", None
+    FWD_BOOKS = BOOKS + (("demo",) if DEMO_ENABLED else ())
+    _DATA_CACHE["t"] = 0.0
+
+def normalize_pem(text):
+    """Accept a pasted key even if line breaks got lost (iPad copy/paste) or the header is missing."""
+    t = (text or "").strip().replace("\r", "")
+    m = re.search(r"-----BEGIN ([A-Z ]*PRIVATE KEY)-----(.*?)-----END \1-----", t, re.S)
+    if m:
+        kind, body = m.group(1), m.group(2)
+    else:
+        kind, body = None, t
+    body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+    if len(body) < 100:
+        raise ValueError("this is not a private key - paste the whole key text (including the BEGIN/END lines) or pick the key file")
+    lines = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    kinds = [kind] if kind else ["RSA PRIVATE KEY", "PRIVATE KEY"]
+    return [f"-----BEGIN {k}-----\n{lines}\n-----END {k}-----\n" for k in kinds]
+
+def demo_connect(key_id, pem_text):
+    """Validate a pasted demo key with Kalshi, then store it and switch the demo book on."""
+    from cryptography.hazmat.primitives import serialization
+    global DEMO_KEY_ID, _DEMO_KEY
+    key_id = (key_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{6,80}", key_id):
+        raise ValueError("the Key ID looks wrong - copy it from demo.kalshi.co -> API keys")
+    key, pem = None, None
+    for cand in normalize_pem(pem_text):
+        try:
+            key = serialization.load_pem_private_key(cand.encode(), password=None)
+            pem = cand
+            break
+        except Exception:
+            continue
+    if key is None:
+        raise ValueError("the private key could not be read - paste the complete text or pick the downloaded key file")
+    old = (DEMO_KEY_ID, _DEMO_KEY)
+    DEMO_KEY_ID, _DEMO_KEY = key_id, key
+    try:
+        bal = demo_balance()
+    except Exception as e:
+        DEMO_KEY_ID, _DEMO_KEY = old
+        msg = str(e)
+        if "401" in msg or "403" in msg:
+            msg = "Kalshi demo rejected this Key ID + key combination (check that both are from the DEMO site)"
+        raise ValueError(msg[:200])
+    path = demo_key_path()
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(pem)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    save_config({"demo": {"enabled": True, "key_id": key_id, "key_file": DEMO_KEY_FILE}})
+    set_demo(True, key_id)
+    _DEMO_KEY = key
+    DEMO_BAL["v"] = bal
+    say(f"demo: key {key_id[:6]}... connected from the website, demo book ON (balance ${bal})")
+    return bal
+
+def demo_disconnect():
+    set_demo(False, "")
+    save_config({"demo": {"enabled": False, "key_id": ""}})
+    try:
+        os.remove(demo_key_path())
+    except FileNotFoundError:
+        pass
+    DEMO_BAL.pop("v", None)
+    say("demo: disconnected from the website, key file deleted, demo book OFF")
+
+def demo_connected():
+    return bool(DEMO_KEY_ID) and os.path.exists(demo_key_path())
 
 def demo_req(method, path, params=None, body=None, auth=True):
     """Signed request to the DEMO exchange only. path like '/portfolio/balance'."""
@@ -909,49 +1006,56 @@ def demo_market_result(ticker):
         return None
     return m.get("result") if m.get("result") in ("yes", "no") else None
 
-def cmd_demo_check():
-    """Step-by-step smoke test of the demo connection. Places one 1-contract bid at 1c and cancels it."""
+def demo_smoke():
+    """Step-by-step test of the demo connection: login, markets, 1x YES bid at 1c, read back, cancel.
+    Returns [{"step", "ok", "detail"}]; stops at the first failure."""
+    import uuid
+    steps, ctx = [], {}
     def step(name, fn):
         try:
             out = fn()
-            print(f"  OK   {name}: {out}")
-            return out
+            steps.append({"step": name, "ok": True, "detail": str(out)[:160]})
+            return True
         except Exception as e:
-            print(f"  FAIL {name}: {e}")
-            sys.exit(1)
-    print(f"Kalshi DEMO check against {DEMO_API}")
-    step("private key loads", lambda: type(demo_key()).__name__)
-    step("key id set", lambda: demo_key_id()[:8] + "...")
-    bal = step("authenticated balance", lambda: f"${demo_balance()}")
-    city = "New York"
-    series = CITIES[city][0]
-    def pick():
-        r = demo_req("GET", "/markets", params={"series_ticker": series, "status": "open", "limit": 200},
-                     auth=False) or {}
+            steps.append({"step": name, "ok": False, "detail": str(e)[:200]})
+            return False
+    series = CITIES["New York"][0]
+    def markets():
+        r = demo_req("GET", "/markets", params={"series_ticker": series, "status": "open", "limit": 200}, auth=False) or {}
         ms = r.get("markets", [])
         if not ms:
             raise RuntimeError(f"no open {series} markets on demo")
-        return ms
-    ms = step(f"open {series} markets on demo", lambda: len(pick()))
-    ms = pick()
-    m = max(ms, key=lambda m: (px(m, "yes_bid") or 0) + (px(m, "yes_ask") or 1))
-    print(f"       sample {m['ticker']}: DEMO bid {px(m, 'yes_bid')} ask {px(m, 'yes_ask')}")
-    try:
-        real = (get_live(f"{API}/markets/{m['ticker']}") or {}).get("market", {})
-        print(f"       same ticker REAL bid {px(real, 'yes_bid')} ask {px(real, 'yes_ask')}  "
-              f"<- demo prices are not the real market")
-    except Exception:
-        pass
-    import uuid
-    body = {"ticker": m["ticker"], "side": "yes", "action": "buy", "type": "limit", "count": 1,
-            "yes_price": 1, "time_in_force": "good_till_canceled", "post_only": True,
-            "client_order_id": str(uuid.uuid4())}
-    o = step("place 1x YES bid @ 1c (post-only)",
-             lambda: (demo_req("POST", "/portfolio/orders", body=body) or {}).get("order", {}))
-    oid = o.get("order_id")
-    step("read order back", lambda: (demo_req("GET", f"/portfolio/orders/{oid}") or {}).get("order", {}).get("status"))
-    step("cancel order", lambda: (demo_req("DELETE", f"/portfolio/orders/{oid}") or {}).get("order", {}).get("status", "cancelled"))
-    print('Demo connection works. Set "enabled": true under "demo" in config.json, then ./stop.sh && ./start.sh')
+        m = max(ms, key=lambda m: (px(m, "yes_bid") or 0) + (px(m, "yes_ask") or 1))
+        ctx["m"] = m
+        return f"{len(ms)} open, sample {m['ticker']} demo bid {px(m, 'yes_bid')} ask {px(m, 'yes_ask')}"
+    def place():
+        body = {"ticker": ctx["m"]["ticker"], "side": "yes", "action": "buy", "type": "limit", "count": 1,
+                "yes_price": 1, "time_in_force": "good_till_canceled", "post_only": True,
+                "client_order_id": str(uuid.uuid4())}
+        o = (demo_req("POST", "/portfolio/orders", body=body) or {}).get("order", {})
+        if not o.get("order_id"):
+            raise RuntimeError(f"no order id in response: {o}")
+        ctx["oid"] = o["order_id"]
+        return f"order {o['order_id'][:8]}... status {o.get('status')}"
+    ok = (step("private key loads", lambda: type(demo_key()).__name__)
+          and step("key id set", lambda: demo_key_id()[:6] + "...")
+          and step("login + balance", lambda: f"${demo_balance()}")
+          and step(f"weather markets on demo ({series})", markets)
+          and step("place 1x YES bid @ 1c (post-only)", place)
+          and step("read order back", lambda: (demo_req("GET", f"/portfolio/orders/{ctx['oid']}") or {}).get("order", {}).get("status"))
+          and step("cancel order", lambda: (demo_req("DELETE", f"/portfolio/orders/{ctx['oid']}") or {}).get("order", {}).get("status", "canceled")))
+    return steps
+
+def cmd_demo_check():
+    print(f"Kalshi DEMO check against {DEMO_API}")
+    steps = demo_smoke()
+    for s in steps:
+        print(f"  {'OK  ' if s['ok'] else 'FAIL'} {s['step']}: {s['detail']}")
+    if all(s["ok"] for s in steps):
+        print("Demo connection works." + ("" if DEMO_ENABLED else
+              ' Turn it on in the website (Demo tile) or set "enabled": true in config.json and restart.'))
+    else:
+        sys.exit(1)
 
 def due_cities(state):
     out = []
@@ -1060,7 +1164,8 @@ def build_data():
             "decs": read_csv(F_DECISIONS)[::-1][:40],
             "done": [r for r in rows if r["status"] == "settled"][::-1][:60],
             "bt": read_json(B_SUMMARY, None), "cap": capacity_summary(),
-            "demo": {"enabled": DEMO_ENABLED, "balance": DEMO_BAL.get("v")},
+            "demo": {"enabled": DEMO_ENABLED, "connected": demo_connected(), "balance": DEMO_BAL.get("v"),
+                     "key_hint": (DEMO_KEY_ID[:6] + "…") if DEMO_KEY_ID else ""},
             "tunnel": {"url": TUNNEL.get("url"), "state": TUNNEL.get("state")},
             "log": log_tail(), "autolock_min": AUTOLOCK_MIN}
     _DATA_CACHE.update(t=time.time(), v=data)
@@ -1200,7 +1305,7 @@ class Web(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            n = min(int(self.headers.get("Content-Length") or 0), 20000 if path == "/api/demo/connect" else 4096)
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
         except Exception:
             body = {}
@@ -1216,6 +1321,24 @@ class Web(BaseHTTPRequestHandler):
         if path == "/api/lock":
             revoke(self.token())
             return self.send(200, {"ok": True})
+        if path.startswith("/api/demo/"):
+            if not token_ok(self.token()):
+                return self.send(401, {"error": "locked"})
+            try:
+                with LOCK:
+                    if path == "/api/demo/connect":
+                        bal = demo_connect(str(body.get("key_id", "")), str(body.get("private_key", "")))
+                        return self.send(200, {"ok": True, "balance": bal})
+                    if path == "/api/demo/check":
+                        steps = demo_smoke()
+                        return self.send(200, {"ok": all(s["ok"] for s in steps), "steps": steps})
+                    if path == "/api/demo/disconnect":
+                        demo_disconnect()
+                        return self.send(200, {"ok": True})
+            except ImportError:
+                return self.send(400, {"error": "package cryptography missing: ./venv/bin/pip install cryptography"})
+            except Exception as e:
+                return self.send(400, {"error": str(e)[:240]})
         return self.send(404, {"error": "not found"})
 
     def static(self, name):
