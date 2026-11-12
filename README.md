@@ -128,11 +128,20 @@ validated out of sample, and tuning it on the same data would overfit.
 | 8763 | weather edge v3 |
 
 ## Troubleshooting
-* **No public URL**: `tmux attach -t Winter` and look for `tunnel:` lines; `cat data/logs/cloudflared.log`.
-  Check `cloudflared --version`. The website still works on your network.
-* **"Winter is not reachable"** on the lock screen: the process is restarting or the Pi is offline.
-* **Port in use**: another app uses 8752 → change `port` in config.json.
-* Logs: `data/logs/winter.log` (full error details), `data/logs/cloudflared.log`.
+* **Public link does not open**
+  1. Run `./venv/bin/python winter.py tunnel-check`. It tests each step: website answers locally, cloudflared runs,
+     URL assigned, connected to Cloudflare, DNS, and the public link fetched from the Pi itself. The first FAIL is the cause.
+  2. Every restart gives a **new** URL. Old links/bookmarks are dead. The current one: `cat data/tunnel_url.txt`
+     or the website top bar (**✓** = verified from outside, **⚠** = not reachable right now, **…** = being checked).
+  3. A brand-new URL needs up to 1–2 minutes. If you open it too early, the phone or router may remember "not found"
+     for a while: wait, then try again in a private tab, another browser, or toggle airplane mode.
+     `start.sh` only prints the link once it is verified.
+  4. Winter checks the link every minute. If it is dead for ~5 minutes, it restarts cloudflared by itself
+     (switching to protocol http2, which works on networks that block QUIC) and you get a new URL.
+  5. A `~/.cloudflared/config.yml` from another project normally blocks quick tunnels; Winter avoids that with its own empty config.
+* **"Winter is not reachable"** on the lock screen: the process is restarting or the Pi is offline (`tmux attach -t Winter`).
+* **Port in use**: Winter now says so loudly in the log (with the process holding it) and retries; `./stop.sh` first, or change `port`.
+* Logs: `data/logs/winter.log` (full error details), `data/logs/cloudflared.log`, `data/tunnel_status.json`.
 
 ## No look-ahead, same code everywhere
 Backtest and forward tester call the same `decide()` function. The backtest uses only the last

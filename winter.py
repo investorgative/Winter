@@ -17,6 +17,7 @@ Commands (from the project folder, with the venv python):
   ./venv/bin/python winter.py                 forward tester + website (port 8752) + Cloudflare tunnel
   ./venv/bin/python winter.py backtest        backtest the last 180 days (--days, --start, --end, --cities)
   ./venv/bin/python winter.py demo-check      test the Kalshi DEMO login, place + cancel one order
+  ./venv/bin/python winter.py tunnel-check    diagnose the public Cloudflare link
   ./venv/bin/python winter.py passcode-check  show where the passcode comes from (never prints it)
 
 All personal settings live in config.json (created from config.example.json by setup.sh).
@@ -1166,7 +1167,7 @@ def build_data():
             "bt": read_json(B_SUMMARY, None), "cap": capacity_summary(),
             "demo": {"enabled": DEMO_ENABLED, "connected": demo_connected(), "balance": DEMO_BAL.get("v"),
                      "key_hint": (DEMO_KEY_ID[:6] + "…") if DEMO_KEY_ID else ""},
-            "tunnel": {"url": TUNNEL.get("url"), "state": TUNNEL.get("state")},
+            "tunnel": {"url": TUNNEL.get("url"), "state": TUNNEL.get("state"), "verified": TUNNEL.get("verified")},
             "log": log_tail(), "autolock_min": AUTOLOCK_MIN}
     _DATA_CACHE.update(t=time.time(), v=data)
     return data
@@ -1353,15 +1354,40 @@ class Web(BaseHTTPRequestHandler):
         with open(fp, "rb") as f:
             self.send(200, f.read(), ctype)
 
+SERVER = {}
+
+def bind_server():
+    """Bind the website port in the main thread so a failure is loud, not a silent dead thread."""
+    for attempt in range(6):
+        try:
+            srv = ThreadingHTTPServer(("0.0.0.0", PORT), Web)
+            srv.daemon_threads = True
+            SERVER["srv"] = srv
+            return srv
+        except OSError as e:
+            who = ""
+            try:
+                out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=5).stdout
+                who = " | ".join(l.strip() for l in out.splitlines() if f":{PORT} " in l)[:200]
+            except Exception:
+                pass
+            say(f"web: port {PORT} not free ({e}) {who} - retry {attempt + 1}/6 in 5 s")
+            time.sleep(5)
+    say(f"web: FATAL - port {PORT} stays busy. Is Winter running twice? ./stop.sh, or change 'port' in config.json")
+    sys.exit(2)
+
 def serve():
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Web)
-    srv.daemon_threads = True
-    srv.serve_forever()
+    SERVER["srv"].serve_forever()
 
 # =====================================================================
 # CLOUDFLARE QUICK TUNNEL (free, no account; new random URL on every start)
+# A watchdog fetches <public url>/healthz from the Pi every minute. If the link is dead for
+# ~5 minutes, cloudflared is restarted (new URL), switching to protocol http2 on the way.
 # =====================================================================
-TUNNEL = {"url": None, "state": "off", "proc": None}
+TUNNEL = {"url": None, "state": "off", "proc": None, "registered": False, "verified": None,
+          "fails": 0, "last_err": "", "since": 0.0, "protocol": "auto", "restarts": 0}
+CF_EMPTY_CONF = os.path.join(DATA, "cloudflared-quick.yml")
+CF_STATUS = os.path.join(DATA, "tunnel_status.json")
 
 def _child_dies_with_parent():
     try:                                    # Linux: kill cloudflared if Winter dies (PR_SET_PDEATHSIG)
@@ -1374,47 +1400,127 @@ def _kill_stale_tunnel():
     try:
         pid = int(open(CF_PID).read().strip())
         cmd = open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="ignore")
-        if "cloudflared" in cmd and f"localhost:{PORT}" in cmd:
+        if "cloudflared" in cmd and f":{PORT}" in cmd:
             os.kill(pid, signal.SIGTERM)
             say(f"tunnel: stopped a leftover cloudflared (pid {pid})")
     except Exception:
         pass
 
+def _tunnel_publish():
+    st = {k: TUNNEL[k] for k in ("url", "state", "registered", "verified", "fails", "last_err", "protocol", "restarts")}
+    st["updated"] = int(time.time())
+    try:
+        write_json(CF_STATUS, st)
+    except Exception:
+        pass
+    _DATA_CACHE["t"] = 0.0
+
 def tunnel_loop():
     exe = shutil.which("cloudflared")
     if not exe:
         TUNNEL["state"] = "missing"
+        _tunnel_publish()
         say("tunnel: cloudflared not installed - website only on your network (run ./setup.sh)")
         return
     _kill_stale_tunnel()
+    for name in ("config.yml", "config.yaml"):
+        if os.path.exists(os.path.expanduser(f"~/.cloudflared/{name}")):
+            say(f"tunnel: ~/.cloudflared/{name} exists (another project) - Winter ignores it via its own empty config")
+    with open(CF_EMPTY_CONF, "w") as f:
+        f.write("# empty on purpose: quick tunnels refuse to start when a default config.yml is present\n")
     while True:
-        TUNNEL.update(state="starting", url=None)
+        TUNNEL.update(state="starting", url=None, registered=False, verified=None, fails=0, last_err="", since=time.time())
+        _tunnel_publish()
+        cmd = [exe, "tunnel", "--config", CF_EMPTY_CONF, "--no-autoupdate"]
+        if TUNNEL["protocol"] != "auto":
+            cmd += ["--protocol", TUNNEL["protocol"]]
+        cmd += ["--url", f"http://127.0.0.1:{PORT}"]
         try:
-            p = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                 preexec_fn=_child_dies_with_parent)
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                 encoding="utf-8", errors="replace", preexec_fn=_child_dies_with_parent)
         except Exception as e:
             say("tunnel: could not start cloudflared:", e)
-            TUNNEL["state"] = "down"
+            TUNNEL.update(state="down", last_err=str(e)[:200])
+            _tunnel_publish()
             time.sleep(60)
             continue
         TUNNEL["proc"] = p
-        with open(CF_PID, "w") as f:
-            f.write(str(p.pid))
-        with open(CF_LOG, "w", encoding="utf-8") as log:
-            for line in p.stdout:
-                log.write(line)
-                log.flush()
+        try:
+            with open(CF_PID, "w") as f:
+                f.write(str(p.pid))
+        except Exception:
+            pass
+        try:
+            log = open(CF_LOG, "w", encoding="utf-8")
+        except Exception:
+            log = None
+        for line in p.stdout:                      # must never stop reading, or cloudflared blocks
+            try:
+                if log:
+                    log.write(line)
+                    log.flush()
                 m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
                 if m and TUNNEL["url"] != m.group(0):
-                    TUNNEL.update(url=m.group(0), state="up")
+                    TUNNEL.update(url=m.group(0), state="connecting")
                     with open(os.path.join(DATA, "tunnel_url.txt"), "w") as f:
                         f.write(m.group(0) + "\n")
-                    say(f"tunnel: PUBLIC URL {m.group(0)}")
+                    say(f"tunnel: URL assigned {m.group(0)} (waiting for the connection)")
+                    _tunnel_publish()
+                if "Registered tunnel connection" in line and not TUNNEL["registered"]:
+                    TUNNEL.update(registered=True, state="up")
+                    say(f"tunnel: connected to Cloudflare - PUBLIC URL {TUNNEL['url']}")
+                    _tunnel_publish()
+                if " ERR " in line or "error=" in line:
+                    TUNNEL["last_err"] = line.strip()[-220:]
+            except Exception:
+                pass
         p.wait()
-        TUNNEL.update(state="down", url=None, proc=None)
-        say(f"tunnel: cloudflared exited (code {p.returncode}) - restarting in 15 s")
+        if log:
+            log.close()
+        TUNNEL.update(state="down", url=None, proc=None, registered=False, verified=None)
+        _tunnel_publish()
+        say(f"tunnel: cloudflared exited (code {p.returncode}) - restarting in 15 s"
+            + (f" | last error: {TUNNEL['last_err'][-120:]}" if TUNNEL["last_err"] else ""))
         time.sleep(15)
+
+def _wd_sleep(sec):
+    time.sleep(sec)
+
+def tunnel_watchdog():
+    """Check the public link from the outside every minute; restart a dead tunnel."""
+    while True:
+        _wd_sleep(60)
+        try:
+            url, p = TUNNEL.get("url"), TUNNEL.get("proc")
+            if not url or not p or p.poll() is not None:
+                continue
+            age = time.time() - TUNNEL["since"]
+            ok = False
+            try:
+                r = requests.get(url + "/healthz", timeout=15, headers={"User-Agent": "winter-watchdog"})
+                ok = r.status_code == 200 and "winter" in r.text
+                err = f"HTTP {r.status_code}"
+            except Exception as e:
+                err = type(e).__name__
+            if ok:
+                if TUNNEL["verified"] is not True:
+                    say(f"tunnel: public link verified from outside ({url})")
+                TUNNEL.update(verified=True, fails=0)
+            else:
+                TUNNEL["fails"] += 1
+                TUNNEL["verified"] = False
+                if TUNNEL["fails"] in (2, 4):
+                    say(f"tunnel: public link not reachable yet ({err}), check {TUNNEL['fails']}")
+                if TUNNEL["fails"] >= 5 and age > 240:
+                    TUNNEL["restarts"] += 1
+                    if TUNNEL["restarts"] >= 1 and TUNNEL["protocol"] == "auto":
+                        TUNNEL["protocol"] = "http2"
+                    say(f"tunnel: link dead for ~5 min ({err}) - restarting cloudflared with protocol "
+                        f"{TUNNEL['protocol']} (you will get a NEW URL)")
+                    stop_tunnel()
+            _tunnel_publish()
+        except Exception:
+            pass
 
 def stop_tunnel(*_):
     p = TUNNEL.get("proc")
@@ -1424,6 +1530,62 @@ def stop_tunnel(*_):
             p.wait(5)
         except Exception:
             p.kill()
+
+def cmd_tunnel_check():
+    """Diagnose the public link step by step (run while Winter is running)."""
+    import socket
+    def line(ok, name, detail=""):
+        print(f"  {'OK  ' if ok else 'FAIL' if ok is False else 'INFO'} {name}{': ' + detail if detail else ''}")
+    print(f"Winter tunnel check (port {PORT})")
+    try:
+        r = requests.get(f"http://127.0.0.1:{PORT}/healthz", timeout=5)
+        line(r.status_code == 200, "website answers locally", f"HTTP {r.status_code}")
+    except Exception as e:
+        line(False, "website answers locally", f"{type(e).__name__} -> Winter is not running or the port is busy (tmux attach -t Winter)")
+    exe = shutil.which("cloudflared")
+    line(bool(exe), "cloudflared installed", exe or "run ./setup.sh")
+    if exe:
+        try:
+            v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+            line(None, "cloudflared version", v[:80])
+        except Exception:
+            pass
+    for name in ("config.yml", "config.yaml"):
+        pth = os.path.expanduser(f"~/.cloudflared/{name}")
+        if os.path.exists(pth):
+            line(None, f"{pth} exists", "fine: Winter starts cloudflared with its own empty config")
+    st = read_json(CF_STATUS, {})
+    running = False
+    try:
+        pid = int(open(CF_PID).read().strip())
+        running = "cloudflared" in open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="ignore")
+    except Exception:
+        pass
+    line(running, "cloudflared process running")
+    url = st.get("url")
+    line(bool(url), "public URL assigned", url or "none yet")
+    line(bool(st.get("registered")), "connected to Cloudflare edge", "protocol " + str(st.get("protocol", "auto")))
+    if url:
+        host = url.replace("https://", "")
+        try:
+            ips = sorted({a[4][0] for a in socket.getaddrinfo(host, 443)})
+            line(True, "DNS resolves", ", ".join(ips[:3]))
+        except Exception as e:
+            line(False, "DNS resolves", f"{e} -> brand-new URLs can take 1-2 min; phones may cache 'not found' for a while")
+        try:
+            r = requests.get(url + "/healthz", timeout=15)
+            line(r.status_code == 200, "public link works from the Pi", f"HTTP {r.status_code}"
+                 + (" (Cloudflare reaches the tunnel but not the website)" if r.status_code in (502, 530) else ""))
+        except Exception as e:
+            line(False, "public link works from the Pi", type(e).__name__)
+    if st.get("last_err"):
+        line(None, "last cloudflared error", st["last_err"][-160:])
+    try:
+        errs = [l.strip() for l in open(CF_LOG, encoding="utf-8", errors="replace") if " ERR " in l][-5:]
+        for e in errs:
+            print("       " + e[-170:])
+    except Exception:
+        pass
 
 # ---------- main loop ----------
 def safe(fn, *a):
@@ -1441,9 +1603,11 @@ def cmd_run():
     atexit.register(stop_tunnel)
     for s in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, _exit)
+    bind_server()
     threading.Thread(target=serve, daemon=True).start()
     if TUNNEL_ON:
         threading.Thread(target=tunnel_loop, daemon=True).start()
+        threading.Thread(target=tunnel_watchdog, daemon=True).start()
     say(f"WINTER {VERSION} · website http://<pi-ip>:{PORT} · books: {', '.join(FWD_BOOKS)}"
         f" · stake {STAKE_FRAC*100:.0f}% (max ${MAX_STAKE_USD:.0f})")
     for c in CITIES:
@@ -1480,6 +1644,8 @@ def main():
         cmd_backtest(sys.argv[2:])
     elif cmd == "demo-check":
         cmd_demo_check()
+    elif cmd == "tunnel-check":
+        cmd_tunnel_check()
     elif cmd == "passcode-check":
         src = "env WINTER_PASSCODE" if os.environ.get("WINTER_PASSCODE") else \
               ("config.json" if os.path.exists(os.path.join(BASE, "config.json")) else "built-in default")

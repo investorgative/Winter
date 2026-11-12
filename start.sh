@@ -15,13 +15,21 @@ else
 fi
 echo "website on your network: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
 if command -v cloudflared >/dev/null 2>&1; then
-  echo -n "waiting for the public tunnel URL"
-  for i in $(seq 1 20); do
-    URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$DIR/data/logs/cloudflared.log" 2>/dev/null | tail -1)
-    [ -n "$URL" ] && break; echo -n "."; sleep 1
+  echo -n "waiting for the public link (checked from outside, up to ~3 min)"
+  URL=""; STATE=""
+  for i in $(seq 1 90); do
+    STATE=$("$PY" -c "import json;s=json.load(open('data/tunnel_status.json'));print(('ok ' if s.get('verified') else 'reg ' if s.get('registered') else 'wait ')+(s.get('url') or ''))" 2>/dev/null)
+    case "$STATE" in ok\ *) URL="${STATE#ok }"; break;; esac
+    echo -n "."; sleep 2
   done
   echo
-  [ -n "$URL" ] && echo "public URL: $URL" || echo "public URL: not up yet - see the top bar of the website or: cat data/tunnel_url.txt"
+  if [ -n "$URL" ]; then
+    echo "public URL (verified): $URL"
+  else
+    echo "public URL not verified yet (${STATE:-no status}). Winter keeps checking and renews a dead link by itself."
+    echo "  current link:   cat data/tunnel_url.txt   (also in the website top bar: ✓ = verified)"
+    echo "  find the cause: ./venv/bin/python winter.py tunnel-check"
+  fi
 else
   echo "cloudflared not installed - no public URL (run ./setup.sh)"
 fi

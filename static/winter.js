@@ -261,7 +261,9 @@ function render(first) {
   /* top bar */
   $("tbUpdated").textContent = "live · " + D.updated.slice(11);
   const tn = D.tunnel || {};
-  $("tbTunnel").textContent = tn.url ? "🌐 " + tn.url.replace("https://", "") : tn.state === "missing" ? "tunnel off" : "tunnel " + (tn.state || "off");
+  $("tbTunnel").textContent = tn.url ? (tn.verified === true ? "✓ " : tn.verified === false ? "⚠ " : "… ") + tn.url.replace("https://", "")
+                            : tn.state === "missing" ? "tunnel off" : "tunnel " + (tn.state || "off");
+  $("tbTunnel").title = tn.verified === true ? "Public link verified - click to copy" : tn.verified === false ? "Public link not reachable right now (Winter retries / renews it)" : "Public link is being checked - click to copy";
   $("tbTunnel").dataset.url = tn.url || "";
   /* hero */
   const tk = D.fwd.taker || {n:0, pnl:0};
