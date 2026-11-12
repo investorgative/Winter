@@ -1,0 +1,18 @@
+{
+  "_comment": "Copy of this file = config.json (setup.sh does it). config.json is NOT in git, so git pull never overwrites it.",
+  "port": 8752,
+  "passcode": "",
+  "autolock_minutes": 10,
+  "tunnel": true,
+  "start_bankroll": 1000,
+  "stake_frac": 0.02,
+  "max_stake_usd": 50,
+  "max_daily": 0.15,
+  "maker_fee_rate": 0.0175,
+  "edge_assumed": 0.0545,
+  "demo": {
+    "enabled": false,
+    "key_id": "",
+    "key_file": "kalshi_demo.pem"
+  }
+}

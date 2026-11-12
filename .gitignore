@@ -1,0 +1,7 @@
+venv/
+data/
+config.json
+*.pem
+*.key
+__pycache__/
+*.pyc

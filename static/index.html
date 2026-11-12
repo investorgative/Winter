@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#060b16">
+<meta name="robots" content="noindex,nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Winter">
+<title>Winter</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/winter.css">
+</head>
+<body class="is-locked">
+<canvas id="snow" aria-hidden="true"></canvas>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<!-- ======================= LOCK SCREEN ======================= -->
+<section id="lock" class="lock" aria-label="Winter is locked">
+  <div class="lock-status">
+    <span class="ls-left"><span class="flake">❄</span> Winter</span>
+    <span class="ls-right"><span id="lsTime"></span><svg class="ls-lock" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="5" y="10" width="14" height="11" rx="3" fill="currentColor"/></svg></span>
+  </div>
+
+  <div class="lock-clock">
+    <div id="lkDate" class="lk-date"></div>
+    <div id="lkTime" class="lk-time"></div>
+  </div>
+
+  <div class="lock-pad" id="pad">
+    <div class="lk-title" id="lkTitle">Enter Passcode</div>
+    <div class="dots" id="dots" aria-live="polite"></div>
+    <div class="lk-msg" id="lkMsg">&nbsp;</div>
+    <div class="keys" id="keys" role="group" aria-label="Passcode keypad"></div>
+    <div class="lk-foot"><button type="button" id="lkDel" class="lk-del">Delete</button></div>
+  </div>
+
+  <svg class="mountains" viewBox="0 0 1440 260" preserveAspectRatio="none" aria-hidden="true">
+    <path class="m3" d="M0 190 L120 120 L210 160 L330 70 L450 150 L560 100 L700 170 L820 80 L960 160 L1080 110 L1200 170 L1320 90 L1440 140 L1440 260 L0 260Z"/>
+    <path class="m2" d="M0 210 L160 150 L260 190 L400 120 L520 200 L660 140 L780 205 L920 135 L1040 195 L1180 150 L1300 210 L1440 170 L1440 260 L0 260Z"/>
+    <path class="m1" d="M0 235 L200 200 L340 228 L500 190 L640 232 L820 196 L980 236 L1140 204 L1300 238 L1440 210 L1440 260 L0 260Z"/>
+  </svg>
+</section>
+
+<!-- ======================= APP ======================= -->
+<main id="app" class="app" aria-hidden="true">
+  <header class="topbar glass">
+    <div class="brand">
+      <span class="logo">❄</span>
+      <div><div class="brand-name">WINTER</div><div class="brand-sub">Kalshi favorite-bias desk</div></div>
+    </div>
+    <div class="top-chips">
+      <span class="chip"><i class="live-dot"></i><span id="tbUpdated">live</span></span>
+      <button type="button" class="chip chip-btn" id="tbTunnel" title="Copy public link">tunnel …</button>
+      <span class="chip mono" id="tbClock"></span>
+      <button type="button" class="lock-btn" id="lockBtn" title="Lock" aria-label="Lock"><svg viewBox="0 0 24 24"><path d="M7 10V8a5 5 0 0 1 10 0v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="5" y="10" width="14" height="11" rx="3" fill="currentColor"/></svg></button>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="glass card hero-main rise" style="--i:0">
+      <div class="label">Taker book · forward test on real prices</div>
+      <div class="hero-row">
+        <div>
+          <div class="hero-num" id="heroCap">$0.00</div>
+          <div class="hero-delta" id="heroDelta"></div>
+          <div class="hero-sub" id="heroSub"></div>
+        </div>
+        <div class="ring-wrap" title="Settled trades needed before the result means something">
+          <svg viewBox="0 0 120 120" class="ring"><circle cx="60" cy="60" r="50" class="ring-bg"/><circle cx="60" cy="60" r="50" class="ring-fg" id="ringFg"/></svg>
+          <div class="ring-txt"><b id="ringN">0</b><span>of 300 trades</span></div>
+        </div>
+      </div>
+      <div class="hero-spark" id="heroSpark"></div>
+    </div>
+    <div class="hero-side">
+      <div class="glass card rise" style="--i:1">
+        <div class="label">Next decision</div>
+        <div class="next-city" id="nextCity">–</div>
+        <div class="countdown mono" id="nextCount">--:--:--</div>
+        <div class="muted small" id="nextWhen"></div>
+      </div>
+      <div class="glass card rise rule" style="--i:2">
+        <div class="label">The rule</div>
+        <div id="ruleTxt" class="small"></div>
+      </div>
+    </div>
+  </section>
+
+  <h2 class="sec"><span>01</span> Books</h2>
+  <section class="grid books" id="books"></section>
+
+  <h2 class="sec"><span>02</span> Cities · decision 15:00 local, day before</h2>
+  <section class="grid cities" id="cities"></section>
+
+  <h2 class="sec"><span>03</span> Capacity · real orderbook at decision time</h2>
+  <section id="cap"></section>
+
+  <h2 class="sec"><span>04</span> Positions & activity</h2>
+  <section class="grid two">
+    <div class="glass card rise"><div class="label">Open positions & working orders</div><div id="open"></div></div>
+    <div class="glass card rise"><div class="label">Activity log</div><pre class="log" id="log"></pre></div>
+  </section>
+
+  <h2 class="sec"><span>05</span> Decisions</h2>
+  <section class="glass card rise" id="decs"></section>
+
+  <h2 class="sec"><span>06</span> Settled forward trades</h2>
+  <section class="glass card rise" id="done"></section>
+
+  <h2 class="sec"><span>07</span> Backtest · same strategy code</h2>
+  <div class="muted small bt-meta" id="btMeta"></div>
+  <section class="grid two" id="bt"></section>
+
+  <h2 class="sec"><span>08</span> Downloads</h2>
+  <section class="downloads" id="dl"></section>
+
+  <footer class="foot muted small" id="foot"></footer>
+</main>
+
+<div id="tip" class="tip" role="tooltip"></div>
+<div id="toast" class="toast"></div>
+<script src="/static/winter.js"></script>
+</body>
+</html>
