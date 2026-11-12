@@ -984,6 +984,22 @@ def order_num(o, key):
                 pass
     return 0.0
 
+def demo_place_order(ticker, count, price, tif, post_only=False):
+    """Kalshi V2 order (the V1 /portfolio/orders create endpoint is retired on demo).
+    side 'bid' = buy YES; count and price are strings; the response is flat (order may also be wrapped)."""
+    import uuid
+    body = {"ticker": ticker, "side": "bid", "count": f"{int(count)}", "price": f"{price:.2f}",
+            "time_in_force": tif, "self_trade_prevention_type": "taker_at_cross",
+            "client_order_id": str(uuid.uuid4())}
+    if post_only:
+        body["post_only"] = True
+    r = demo_req("POST", "/portfolio/events/orders", body=body) or {}
+    return r.get("order", r)
+
+def demo_cancel_order(order_id, ticker):
+    r = demo_req("DELETE", f"/portfolio/events/orders/{order_id}", params={"market_ticker": ticker}) or {}
+    return r.get("order", r)
+
 def demo_execute(base, fav, bank):
     """Mirror the taker decision on the demo exchange: IOC limit buy YES at the real decision ask."""
     row = dict(base, book="demo", limit=fav["ask"], price="", contracts=0, fee=0, filled="no")
@@ -995,17 +1011,15 @@ def demo_execute(base, fav, bank):
         if not m:
             say("  demo: ticker not listed on the demo exchange")
             return dict(row, status="nofill", fill_src="demo: not listed")
-        import uuid
-        body = {"ticker": fav["ticker"], "side": "yes", "action": "buy", "type": "limit",
-                "count": int(n_want), "yes_price": int(round(fav["ask"] * 100)),
-                "time_in_force": "immediate_or_cancel", "client_order_id": str(uuid.uuid4())}
-        o = (demo_req("POST", "/portfolio/orders", body=body) or {}).get("order", {})
+        o = demo_place_order(fav["ticker"], n_want, fav["ask"], "immediate_or_cancel")
     except Exception as e:
         say("  demo order failed:", e)
         return dict(row, status="error", fill_src=f"demo: {str(e)[:80]}")
     n = int(order_num(o, "fill_count"))
-    cost = px(o, "taker_fill_cost") or 0.0
-    fees = px(o, "taker_fees") or 0.0
+    avg_p = px(o, "average_fill_price")
+    avg_fee = px(o, "average_fee_paid") or 0.0
+    cost = (avg_p * n) if avg_p is not None else (px(o, "taker_fill_cost") or 0.0)
+    fees = (avg_fee * n) if o.get("average_fee_paid") not in (None, "") else (px(o, "taker_fees") or 0.0)
     demo_ask = px(m, "yes_ask")
     note = f"demo:{o.get('order_id', '?')[:8]} demo ask {demo_ask if demo_ask is not None else '?'}"
     if n < 1:
@@ -1046,21 +1060,27 @@ def demo_smoke():
         ctx["m"] = m
         return f"{len(ms)} open, sample {m['ticker']} demo bid {px(m, 'yes_bid')} ask {px(m, 'yes_ask')}"
     def place():
-        body = {"ticker": ctx["m"]["ticker"], "side": "yes", "action": "buy", "type": "limit", "count": 1,
-                "yes_price": 1, "time_in_force": "good_till_canceled", "post_only": True,
-                "client_order_id": str(uuid.uuid4())}
-        o = (demo_req("POST", "/portfolio/orders", body=body) or {}).get("order", {})
+        o = demo_place_order(ctx["m"]["ticker"], 1, 0.01, "good_till_canceled", post_only=True)
         if not o.get("order_id"):
-            raise RuntimeError(f"no order id in response: {o}")
+            raise RuntimeError(f"no order id in response: {str(o)[:150]}")
         ctx["oid"] = o["order_id"]
-        return f"order {o['order_id'][:8]}... status {o.get('status')}"
+        return f"order {o['order_id'][:8]}... filled {o.get('fill_count', '?')} resting {o.get('remaining_count', '?')}"
+    def read_back():
+        try:                                       # no V2 'get order' is documented: best effort
+            o = (demo_req("GET", f"/portfolio/orders/{ctx['oid']}") or {}).get("order", {})
+            return f"status {o.get('status', '?')}"
+        except Exception as e:
+            return f"skipped ({str(e)[:60]}) - not needed, cancel confirms the order"
+    def cancel():
+        o = demo_cancel_order(ctx["oid"], ctx["m"]["ticker"])
+        return f"canceled, reduced by {o.get('reduced_by', o.get('status', '?'))}"
     ok = (step("private key loads", lambda: type(demo_key()).__name__)
           and step("key id set", lambda: demo_key_id()[:6] + "...")
           and step("login + balance", lambda: f"${demo_balance()}")
           and step(f"weather markets on demo ({series})", markets)
-          and step("place 1x YES bid @ 1c (post-only)", place)
-          and step("read order back", lambda: (demo_req("GET", f"/portfolio/orders/{ctx['oid']}") or {}).get("order", {}).get("status"))
-          and step("cancel order", lambda: (demo_req("DELETE", f"/portfolio/orders/{ctx['oid']}") or {}).get("order", {}).get("status", "canceled")))
+          and step("place 1x YES bid @ 1c (V2, post-only)", place)
+          and step("read order back", read_back)
+          and step("cancel order (V2)", cancel))
     return steps
 
 def cmd_demo_check():
