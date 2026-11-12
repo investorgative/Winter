@@ -18,6 +18,7 @@ Commands (from the project folder, with the venv python):
   ./venv/bin/python winter.py backtest        backtest the last 180 days (--days, --start, --end, --cities)
   ./venv/bin/python winter.py demo-check      test the Kalshi DEMO login, place + cancel one order
   ./venv/bin/python winter.py tunnel-check    diagnose the public Cloudflare link
+  ./venv/bin/python winter.py demo-connect --key-id ID < key.pem   connect the Kalshi demo key
   ./venv/bin/python winter.py passcode-check  show where the passcode comes from (never prints it)
 
 All personal settings live in config.json (created from config.example.json by setup.sh).
@@ -119,7 +120,19 @@ CITIES = {  # city: (Kalshi series, timezone)
 API = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_ENABLED = bool(CONF["demo"].get("enabled"))
 DEMO_KEY_ID = str(CONF["demo"].get("key_id") or "")
-DEMO_KEY_FILE = str(CONF["demo"].get("key_file") or "kalshi_demo.pem")
+DEFAULT_KEY_FILE = "kalshi_demo.pem"
+
+def _sane_key_file(v):
+    """key_file must be a plain file name/path ending in .pem/.key - anything else (e.g. a pasted key) -> default."""
+    v = str(v or "").strip()
+    if v and len(v) <= 200 and re.fullmatch(r"[\w./~-]+", v) and v.endswith((".pem", ".key")) \
+            and (not os.path.isabs(v) or os.path.isdir(os.path.dirname(v))):
+        return v
+    if v:
+        print(f'config.json: demo.key_file is not a file name - using {DEFAULT_KEY_FILE} instead', flush=True)
+    return DEFAULT_KEY_FILE
+
+DEMO_KEY_FILE = _sane_key_file(CONF["demo"].get("key_file"))
 DEMO_API = "https://external-api.demo.kalshi.co/trade-api/v2"
 # ------------------------------
 
@@ -865,10 +878,10 @@ def normalize_pem(text):
     else:
         kind, body = None, t
     body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
-    if len(body) < 100:
+    if len(body) < 40:          # Ed25519 keys are only 64 base64 characters, RSA ~1600
         raise ValueError("this is not a private key - paste the whole key text (including the BEGIN/END lines) or pick the key file")
     lines = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
-    kinds = [kind] if kind else ["RSA PRIVATE KEY", "PRIVATE KEY"]
+    kinds = [kind] if kind else ["PRIVATE KEY", "RSA PRIVATE KEY"]
     return [f"-----BEGIN {k}-----\n{lines}\n-----END {k}-----\n" for k in kinds]
 
 def demo_connect(key_id, pem_text):
@@ -898,7 +911,10 @@ def demo_connect(key_id, pem_text):
         if "401" in msg or "403" in msg:
             msg = "Kalshi demo rejected this Key ID + key combination (check that both are from the DEMO site)"
         raise ValueError(msg[:200])
+    global DEMO_KEY_FILE
+    DEMO_KEY_FILE = _sane_key_file(DEMO_KEY_FILE)
     path = demo_key_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -1644,6 +1660,19 @@ def main():
         cmd_backtest(sys.argv[2:])
     elif cmd == "demo-check":
         cmd_demo_check()
+    elif cmd == "demo-connect":
+        ap = argparse.ArgumentParser(prog="winter.py demo-connect")
+        ap.add_argument("--key-id", required=True)
+        a = ap.parse_args(sys.argv[2:])
+        print("Paste the private key, then Ctrl+D:" if sys.stdin.isatty() else "Reading the private key ...")
+        pem = sys.stdin.read()
+        try:
+            bal = demo_connect(a.key_id, pem)
+        except ImportError:
+            print("FAIL: package cryptography missing -> ./venv/bin/pip install cryptography"); sys.exit(1)
+        except Exception as e:
+            print(f"FAIL: {e}"); sys.exit(1)
+        print(f"OK: demo key connected, demo balance ${bal}. Restart Winter so the running process uses it: ./stop.sh && ./start.sh")
     elif cmd == "tunnel-check":
         cmd_tunnel_check()
     elif cmd == "passcode-check":
